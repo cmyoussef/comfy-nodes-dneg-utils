@@ -18,6 +18,7 @@ from .fpt_lens_distort.nodes import (
     FPTGenerateSTMap,
     FPTUnbulge,
 )
+from .dn_qwen.nodes.cremote_qwen_captioning import DN_QwenVideoCaptioner
 
 api = ComfyAPI()
 
@@ -30,6 +31,7 @@ _ALL_NODES = [
     FPTLensCalibInfo,
     FPTGenerateSTMap,
     FPTUnbulge,
+    DN_QwenVideoCaptioner,
 ]
 
 _FPT_LENS_NODE_REPLACEMENTS = [
