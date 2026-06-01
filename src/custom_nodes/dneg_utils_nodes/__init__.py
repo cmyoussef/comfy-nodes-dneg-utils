@@ -3,6 +3,7 @@
 Small general utility nodes that do not yet justify dedicated repositories.
 Add new node modules under ``_nodes/`` and register them in ``_ALL_NODES``.
 """
+import logging
 
 from typing_extensions import override
 
@@ -20,6 +21,27 @@ from .fpt_lens_distort.nodes import (
 )
 from .dn_qwen.nodes.cremote_qwen_captioning import DN_QwenVideoCaptioner
 
+from .wan_helper_nodes.wan_alembic_camera import WanHelper_WanAlembicCamera
+from .wan_helper_nodes.landmark_preview import WanHelper_LandmarkPreview
+from .wan_helper_nodes.frame_padder import WanHelper_WanFramePadder
+from .wan_helper_nodes.frame_extender import WanHelper_WanFrameExtender
+from .wan_helper_nodes.mask_ramp import WanHelper_MaskRamp
+from .wan_helper_nodes.depth_normalize import WanHelper_DepthNormalize
+from .wan_helper_nodes.position_relative import (
+    WanHelper_GetLocatorPosition,
+    WanHelper_ListAlembicLocators,
+    WanHelper_NormalizePositionPass,
+    WanHelper_WorldPositionToHeadRelative,
+)
+from .wan_helper_nodes.lora_select_multi_path import WanHelper_LoraSelectMultiPath
+
+_logger = logging.getLogger(__name__)
+try:
+    from .wan_helper_nodes.delayed_masking import WanHelper_DelayedMasking
+except Exception:  # pragma: no cover - depends on Comfy runtime environment
+    WanHelper_DelayedMasking = None
+    _logger.exception("Failed to import WanHelper_DelayedMasking; continuing without this node.")
+
 api = ComfyAPI()
 
 _ALL_NODES = [
@@ -32,6 +54,17 @@ _ALL_NODES = [
     FPTGenerateSTMap,
     FPTUnbulge,
     DN_QwenVideoCaptioner,
+    WanHelper_WanAlembicCamera,
+    WanHelper_LandmarkPreview,
+    WanHelper_WanFramePadder,
+    WanHelper_WanFrameExtender,
+    WanHelper_MaskRamp,
+    WanHelper_DepthNormalize,
+    WanHelper_WorldPositionToHeadRelative,
+    WanHelper_ListAlembicLocators,
+    WanHelper_GetLocatorPosition,
+    WanHelper_NormalizePositionPass,
+    WanHelper_LoraSelectMultiPath,
 ]
 
 _FPT_LENS_NODE_REPLACEMENTS = [
@@ -42,6 +75,20 @@ _FPT_LENS_NODE_REPLACEMENTS = [
     ("fpt_Unbulge", "FPT_Unbulge"),
 ]
 
+_WAN_HELPER_NODE_REPLACEMENTS = [
+    ("WanHelper_WanAlembicCamera", "WanHelper_WanAlembicCamera"),
+    ("WanHelper_LandmarkPreview", "WanHelper_LandmarkPreview"),
+    ("WanHelper_WanFramePadder", "WanHelper_WanFramePadder"),
+    ("WanHelper_WanFrameExtender", "WanHelper_WanFrameExtender"),
+    ("WanHelper_MaskRamp", "WanHelper_MaskRamp"),
+    ("WanHelper_DepthNormalize", "WanHelper_DepthNormalize"),
+    ("WanHelper_WorldPositionToHeadRelative", "WanHelper_WorldPositionToHeadRelative"),
+    ("WanHelper_ListAlembicLocators", "WanHelper_ListAlembicLocators"),
+    ("WanHelper_GetLocatorPosition", "WanHelper_GetLocatorPosition"),
+    ("WanHelper_NormalizePositionPass", "WanHelper_NormalizePositionPass"),
+    ("WanHelper_LoraSelectMultiPath", "WanHelper_LoraSelectMultiPath"),
+]
+
 
 class _DNEGUtilsExtension(ComfyExtension):
     @override
@@ -50,10 +97,17 @@ class _DNEGUtilsExtension(ComfyExtension):
             await api.node_replacement.register(
                 io.NodeReplace(new_node_id=new_node_id, old_node_id=old_node_id)
             )
+        for old_node_id, new_node_id in _WAN_HELPER_NODE_REPLACEMENTS:
+            await api.node_replacement.register(
+                io.NodeReplace(new_node_id=new_node_id, old_node_id=old_node_id)
+            )
 
     @override
     async def get_node_list(self) -> list[type[io.ComfyNode]]:
-        return _ALL_NODES
+        node_list = list(_ALL_NODES)
+        if WanHelper_DelayedMasking is not None:
+            node_list.append(WanHelper_DelayedMasking)
+        return node_list
 
 
 async def comfy_entrypoint() -> _DNEGUtilsExtension:
