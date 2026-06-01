@@ -1,0 +1,29 @@
+[project]
+name = "comfy-nodes-dneg-utils"
+version = "0.1.0"
+description = "DNEG — shared utility ComfyUI custom nodes"
+requires-python = ">=3.10"
+license = "MIT"
+
+dependencies = []
+
+[project.urls]
+Repository = "http://stash/projects/MELG/repos/comfy-nodes-dneg-utils/browse"
+
+[project.entry-points."comfyui.custom_nodes"]
+dneg_utils_nodes = "custom_nodes.dneg_utils_nodes"
+
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.package-data]
+"custom_nodes.dneg_utils_nodes" = ["web/*.js", "web/*.css"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["dneg_utils*", "custom_nodes*"]
+namespaces = true
