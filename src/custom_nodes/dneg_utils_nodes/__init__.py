@@ -42,6 +42,13 @@ except Exception:  # pragma: no cover - depends on Comfy runtime environment
     WanHelper_DelayedMasking = None
     _logger.exception("Failed to import WanHelper_DelayedMasking; continuing without this node.")
 
+try:
+    from .deep_hdr.node import CREMOTE_DeepHDR
+except Exception:  # pragma: no cover - depends on deep_hdr bob package
+    CREMOTE_DeepHDR = None
+    _logger.exception("Failed to import CREMOTE_DeepHDR; continuing without this node. "
+                      "Ensure 'deep_hdr' is deployed with target 'ml_cv' in dneg.json.")
+
 api = ComfyAPI()
 
 _ALL_NODES = [
@@ -107,6 +114,8 @@ class _DNEGUtilsExtension(ComfyExtension):
         node_list = list(_ALL_NODES)
         if WanHelper_DelayedMasking is not None:
             node_list.append(WanHelper_DelayedMasking)
+        if CREMOTE_DeepHDR is not None:
+            node_list.append(CREMOTE_DeepHDR)
         return node_list
 
 
