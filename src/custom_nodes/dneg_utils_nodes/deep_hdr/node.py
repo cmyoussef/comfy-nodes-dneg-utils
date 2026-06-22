@@ -3,51 +3,93 @@ deep_hdr.node
 
 CREMOTE_DeepHDR — ComfyUI node for DeepHDR highlight reconstruction.
 
-Wraps deep_hdr.core.deep_hdr.Run.  Accepts a JSON list of scene-linear EXR
-paths, computes the saturation mask in Python, writes temporary EXRs for the
-model, runs inference, and returns output EXR paths.
+Accepts IMAGE and optional MASK tensors, runs deep_hdr.core.deep_hdr.Run
+internally (via a temp-file round-trip that is invisible to the user),
+and returns IMAGE + MASK tensors compatible with downstream Comfy nodes.
 
 Behaviour matches the existing Nuke Bridge gizmo as closely as possible.
-Output EXRs have gamma_correct=0.5 baked in (values are H^0.5), identical to
-what Nuke reads back from the gizmo before any inverse-multiply Grade node.
+Output IMAGE has gamma_correct=0.5 baked in (values are H^0.5), identical
+to what Nuke reads back from the gizmo before any inverse-multiply Grade node.
 """
 from __future__ import annotations
 
-import json
 import os
-from typing import List
+from typing import Optional
+
+import numpy as np
+import torch
 
 from comfy_api.latest import io
 
 from ._progress import report_progress
-from .core import run_deep_hdr
-
-_DEFAULT_WEIGHTS = "/jobs/ADGRE/ldev_pipe/nuke/ai/deep_hdr/deephdr/ldr2hdr.pth"
+from .core import run_deep_hdr_arrays
 
 
-def _parse_paths(images_json: str) -> List[str]:
-    """Parse a JSON list of paths (with a few robust fallbacks)."""
-    s = (images_json or "").strip()
-    if not s:
-        return []
+def _resolve_weights() -> str:
+    """
+    Find ldr2hdr.pth via a prioritised search, with no hardcoded show paths.
+
+    Resolution order:
+      1. DEEP_HDR_WEIGHTS_PATH env var  — explicit admin override
+      2. $COMFY_MODELS_ROOT/models/deep_hdr/ldr2hdr.pth  — DNEG site-wide shared models
+      3. ComfyUI folder_paths checkpoints / models_dir  — standard ComfyUI layout
+      4. $COMFYUI_HOME/models/deep_hdr/ldr2hdr.pth  — local ComfyUI fallback
+    """
+    env_path = os.environ.get("DEEP_HDR_WEIGHTS_PATH", "").strip()
+    if env_path and os.path.isfile(env_path):
+        return env_path
+
+    models_root = os.environ.get("COMFY_MODELS_ROOT", "").strip()
+    if models_root:
+        candidate = os.path.join(models_root, "models", "deep_hdr", "ldr2hdr.pth")
+        if os.path.isfile(candidate):
+            return candidate
 
     try:
-        obj = json.loads(s)
-        if isinstance(obj, list):
-            return [str(p) for p in obj if str(p).strip()]
-        if isinstance(obj, str):
-            return [obj]
-    except Exception:
+        import folder_paths
+        search_dirs: list[str] = []
+        try:
+            search_dirs += folder_paths.get_folder_paths("checkpoints")
+        except Exception:
+            pass
+        try:
+            search_dirs.append(folder_paths.models_dir)
+        except Exception:
+            pass
+        for base in search_dirs:
+            candidate = os.path.join(base, "deep_hdr", "ldr2hdr.pth")
+            if os.path.isfile(candidate):
+                return candidate
+    except ImportError:
         pass
 
-    if "\n" in s:
-        return [ln.strip() for ln in s.splitlines() if ln.strip()]
+    comfyui_home = os.environ.get("COMFYUI_HOME", "").strip()
+    if comfyui_home:
+        candidate = os.path.join(comfyui_home, "models", "deep_hdr", "ldr2hdr.pth")
+        if os.path.isfile(candidate):
+            return candidate
 
-    return [s]
+    # Try the current show's Nuke AI path (show-local deployment).
+    show = os.environ.get("SHOW", "").strip()
+    if show:
+        candidate = f"/jobs/{show}/ldev_pipe/nuke/ai/deep_hdr/deephdr/ldr2hdr.pth"
+        if os.path.isfile(candidate):
+            return candidate
+
+    # Last resort: known shared location where the model was first deployed.
+    _FALLBACK = "/jobs/ADGRE/ldev_pipe/nuke/ai/deep_hdr/deephdr/ldr2hdr.pth"
+    if os.path.isfile(_FALLBACK):
+        return _FALLBACK
+
+    raise FileNotFoundError(
+        "DeepHDR weights (ldr2hdr.pth) not found.\n"
+        "Set DEEP_HDR_WEIGHTS_PATH to the absolute path of ldr2hdr.pth, or\n"
+        "place it at $COMFY_MODELS_ROOT/models/deep_hdr/ldr2hdr.pth."
+    )
 
 
 class CREMOTE_DeepHDR(io.ComfyNode):
-    """DeepHDR highlight reconstruction node (DNEG / ADGRE)."""
+    """DeepHDR highlight reconstruction node (DNEG)."""
 
     @classmethod
     def define_schema(cls) -> io.Schema:
@@ -56,27 +98,23 @@ class CREMOTE_DeepHDR(io.ComfyNode):
             display_name="CREMOTE: DeepHDR (Highlight Reconstruction)",
             category="image/dneg",
             inputs=[
-                io.String.Input(
-                    "input_paths_json",
-                    default="[]",
-                    multiline=True,
+                io.Image.Input(
+                    "image",
                     tooltip=(
-                        'JSON list of scene-linear input EXR paths, '
-                        'e.g. ["/path/frame.1001.exr", "/path/frame.1002.exr"]. '
-                        'Pixels with values >= saturation_threshold are treated as clipped.'
+                        "Scene-linear input image(s). "
+                        "Pixels at or above saturation_threshold are treated as clipped "
+                        "and will be reconstructed by the model."
                     ),
                 ),
-                io.String.Input(
-                    "output_dir",
-                    default="",
-                    multiline=False,
-                    tooltip="Directory to write reconstructed EXR frames into.",
-                ),
-                io.String.Input(
-                    "weights_path",
-                    default=_DEFAULT_WEIGHTS,
-                    multiline=False,
-                    tooltip="Absolute path to the ldr2hdr.pth model weights file.",
+                io.Mask.Input(
+                    "mask",
+                    optional=True,
+                    tooltip=(
+                        "Optional saturation mask (values in [0, 1], 1 = saturated). "
+                        "If connected, this overrides the auto-computed saturation mask "
+                        "and saturation_threshold is ignored. "
+                        "If absent, the mask is computed from the image using saturation_threshold."
+                    ),
                 ),
                 io.Combo.Input(
                     "device",
@@ -104,32 +142,18 @@ class CREMOTE_DeepHDR(io.ComfyNode):
                     max=1.0,
                     step=0.01,
                     tooltip=(
-                        "Pixels at or above this value are treated as saturated/clipped "
-                        "(matches the hardcoded 0.95 in Nuke's saturation_mask Expression node)."
+                        "Threshold for the auto-computed saturation mask: pixels at or above "
+                        "this value are treated as saturated/clipped and passed to DeepHDR for "
+                        "reconstruction (matches the hardcoded 0.95 in Nuke's saturation_mask "
+                        "Expression node).\n\n"
+                        "Ignored when a MASK input is connected — the widget is greyed out "
+                        "automatically in that case."
                     ),
-                ),
-                io.Int.Input(
-                    "start_frame",
-                    default=1001,
-                    min=0,
-                    max=999999,
-                    step=1,
-                    tooltip=(
-                        "Frame number for the first input path. "
-                        "Output files are numbered from start_frame onwards."
-                    ),
-                ),
-                io.String.Input(
-                    "output_prefix",
-                    default="frame_",
-                    multiline=False,
-                    optional=True,
-                    tooltip="Prefix for output EXR filenames (e.g. 'frame_' → 'frame_001001.exr').",
                 ),
             ],
             outputs=[
-                io.String.Output("output_paths_json"),
-                io.String.Output("output_pattern"),
+                io.Image.Output("image"),
+                io.Mask.Output("mask"),
                 io.String.Output("info"),
             ],
         )
@@ -137,49 +161,58 @@ class CREMOTE_DeepHDR(io.ComfyNode):
     @classmethod
     def execute(
         cls,
-        input_paths_json: str,
-        output_dir: str,
-        weights_path: str,
+        image: torch.Tensor,
         device: str,
         multiply: float,
         saturation_threshold: float,
-        start_frame: int,
-        output_prefix: str = "frame_",
+        mask: Optional[torch.Tensor] = None,
     ) -> io.NodeOutput:
-        paths = _parse_paths(input_paths_json)
-        if not paths:
-            raise ValueError(
-                "input_paths_json contains no paths. "
-                'Provide a JSON list such as ["/path/frame.1001.exr", ...].'
-            )
+        weights_path = _resolve_weights()
 
-        if not output_dir:
-            raise ValueError("output_dir is required")
+        # image: [B,H,W,3]
+        b = image.shape[0]
+        images_np = [image[i].cpu().numpy().astype(np.float32) for i in range(b)]
 
-        if not weights_path:
-            raise ValueError("weights_path is required")
+        # mask: [B,H,W] — expand each frame to [H,W,1] for run_deep_hdr_arrays
+        masks_np = None
+        if mask is not None:
+            masks_np = [
+                mask[i].cpu().numpy().astype(np.float32)[:, :, np.newaxis]
+                for i in range(b)
+            ]
 
-        out_paths, out_pattern = run_deep_hdr(
-            input_paths=paths,
-            output_dir=output_dir,
+        out_images, masks_used = run_deep_hdr_arrays(
+            images=images_np,
             weights_path=weights_path,
             device=device,
             multiply=float(multiply),
             saturation_threshold=float(saturation_threshold),
-            start_frame=int(start_frame),
-            output_prefix=output_prefix or "frame_",
+            masks=masks_np,
             report_progress=report_progress,
         )
 
+        # Stack outputs back to Comfy tensor shapes
+        out_tensor = torch.from_numpy(np.stack(out_images, axis=0))  # [B,H,W,3]
+
+        # masks_used are [H,W,1] — squeeze channel dim and stack to [B,H,W]
+        mask_arrays = [
+            m[:, :, 0] if m.ndim == 3 else m
+            for m in masks_used
+        ]
+        mask_tensor = torch.from_numpy(np.stack(mask_arrays, axis=0))  # [B,H,W]
+
+        mask_source = (
+            "provided"
+            if mask is not None
+            else f"auto (saturation_threshold={float(saturation_threshold):.2f})"
+        )
         info_lines = [
-            f"Frames processed: {len(out_paths)}",
+            f"Frames processed: {b}",
             f"Device: {device}",
             f"Weights: {weights_path}",
             f"Multiply: {float(multiply):.3f}",
-            f"Saturation threshold: {float(saturation_threshold):.3f}",
-            f"Output dir: {os.path.abspath(os.path.expanduser(output_dir))}",
-            f"Output pattern: {out_pattern}",
-            "Output EXRs have gamma_correct=0.5 baked in (values are H^0.5).",
+            f"Mask: {mask_source}",
+            "Output has gamma_correct=0.5 baked in (values are H^0.5).",
         ]
         if abs(float(multiply) - 1.0) > 1e-6:
             info_lines.append(
@@ -188,4 +221,4 @@ class CREMOTE_DeepHDR(io.ComfyNode):
                 "This node does not — apply the inverse manually if needed."
             )
 
-        return io.NodeOutput(json.dumps(out_paths), out_pattern, "\n".join(info_lines))
+        return io.NodeOutput(out_tensor, mask_tensor, "\n".join(info_lines))

@@ -1,9 +1,13 @@
 """
 deep_hdr.core
 
-Wrapper for deep_hdr.core.deep_hdr.Run.
+Wrappers for deep_hdr.core.deep_hdr.Run.
 
-Manages temporary EXR files, saturation mask computation, and the Run
+Two entry points:
+  run_deep_hdr        — legacy file-based API (kept for backward compat)
+  run_deep_hdr_arrays — tensor-friendly API: accepts/returns numpy arrays
+
+Both manage temporary EXR files, saturation mask computation, and the Run
 lifecycle.  Uses OpenImageIO directly for temp file I/O so that no
 gamma correction is applied to the preprocessing step.
 
@@ -162,3 +166,110 @@ def run_deep_hdr(
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     return out_paths, output_pattern
+
+
+def run_deep_hdr_arrays(
+    images: List[np.ndarray],
+    weights_path: str,
+    device: str,
+    multiply: float,
+    saturation_threshold: float,
+    masks: Optional[List[np.ndarray]] = None,
+    report_progress: Optional[Callable[[int, int], None]] = None,
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
+    """
+    Run DeepHDR highlight reconstruction on numpy arrays.
+
+    Workflow mirrors run_deep_hdr exactly:
+      1. Apply multiply factor (matches Nuke multiply_knob).
+      2. Compute saturation mask via get_saturated_regions(), or use provided mask.
+      3. Write pre-multiplied input and mask to temp EXRs (no gamma correction).
+      4. Call deep_hdr.core.deep_hdr.Run(...).predict().
+      5. Read output EXRs — these have gamma_correct=0.5 baked in (values are H^0.5),
+         matching the Nuke gizmo output.
+      6. Clean up temp dir.
+
+    Args:
+        images: List of [H,W,3] float32 numpy arrays (scene-linear).
+        weights_path: Absolute path to ldr2hdr.pth.
+        device: "cuda" or "cpu".
+        multiply: Pre-multiply applied to input before inference.
+        saturation_threshold: Threshold for auto saturation mask (only used when masks=None).
+        masks: Optional list of [H,W,1] or [H,W] float32 arrays.
+               If None, mask is computed from the multiplied image via get_saturated_regions().
+        report_progress: Optional callback (current_step, total_steps).
+
+    Returns:
+        (out_images, masks_used): Lists of [H,W,3] float32 arrays.
+    """
+    Run, get_saturated_regions = _require_deep_hdr()
+
+    if not images:
+        raise ValueError("images is empty — no frames to process")
+
+    weights_path = os.path.abspath(os.path.expanduser(weights_path))
+    if not os.path.isfile(weights_path):
+        raise FileNotFoundError(
+            f"Weights file not found: {weights_path}\n"
+            "Set DEEP_HDR_WEIGHTS_PATH or place ldr2hdr.pth at "
+            "$COMFY_MODELS_ROOT/models/deep_hdr/ldr2hdr.pth"
+        )
+
+    n_frames = len(images)
+    # Progress: n_frames preprocessing ticks + 1 tick for inference
+    total_steps = n_frames + 1
+
+    tmpdir = tempfile.mkdtemp(prefix="cremote_deep_hdr_")
+    try:
+        input_pattern = os.path.join(tmpdir, "input_%04d.exr")
+        mask_pattern = os.path.join(tmpdir, "mask_%04d.exr")
+        output_pattern = os.path.join(tmpdir, "output_%04d.exr")
+
+        masks_used: List[np.ndarray] = []
+        for i, img_np in enumerate(images):
+            img_mul = img_np * float(multiply)
+
+            if masks is not None:
+                mask_np = masks[i].astype(np.float32)
+            else:
+                mask_np = get_saturated_regions(img_mul, th=float(saturation_threshold))
+
+            # _write_exr requires [H,W,C] — promote [H,W] masks to [H,W,1]
+            if mask_np.ndim == 2:
+                mask_np = mask_np[:, :, np.newaxis]
+
+            masks_used.append(mask_np)
+            _write_exr(img_mul, input_pattern % i)
+            _write_exr(mask_np, mask_pattern % i)
+
+            if report_progress:
+                report_progress(i + 1, total_steps)
+
+        frame_range = (0, n_frames - 1)
+        inference = Run(
+            input=input_pattern,
+            output=output_pattern,
+            mask=mask_pattern,
+            weights=weights_path,
+            device_menu=device,
+            frame_range=frame_range,
+        )
+        inference.predict()
+
+        if report_progress:
+            report_progress(total_steps, total_steps)
+
+        out_images: List[np.ndarray] = []
+        for i in range(n_frames):
+            out_path = output_pattern % i
+            if not os.path.isfile(out_path):
+                raise RuntimeError(
+                    f"Expected output EXR was not produced: {out_path}\n"
+                    "The inference may have failed silently — check server logs."
+                )
+            out_images.append(_load_exr(out_path))
+
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    return out_images, masks_used

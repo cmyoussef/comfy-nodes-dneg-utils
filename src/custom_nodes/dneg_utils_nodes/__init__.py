@@ -3,6 +3,10 @@
 Small general utility nodes that do not yet justify dedicated repositories.
 Add new node modules under ``_nodes/`` and register them in ``_ALL_NODES``.
 """
+
+# ComfyUI reads this to serve all .js files under web/ as frontend extensions.
+WEB_DIRECTORY = "web"
+
 import logging
 
 from typing_extensions import override
