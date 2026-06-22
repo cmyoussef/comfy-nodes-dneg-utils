@@ -30,61 +30,88 @@ def _resolve_weights() -> str:
     Find ldr2hdr.pth via a prioritised search, with no hardcoded show paths.
 
     Resolution order:
-      1. DEEP_HDR_WEIGHTS_PATH env var  — explicit admin override
-      2. $COMFY_MODELS_ROOT/models/deep_hdr/ldr2hdr.pth  — DNEG site-wide shared models
-      3. ComfyUI folder_paths checkpoints / models_dir  — standard ComfyUI layout
-      4. $COMFYUI_HOME/models/deep_hdr/ldr2hdr.pth  — local ComfyUI fallback
+      1. DEEP_HDR_WEIGHTS_PATH env var — explicit admin override.
+      2. DNEG shared Comfy models repository.
+      3. COMFY_MODELS_ROOT/deep_hdr/ldr2hdr.pth.
+      4. COMFY_MODELS_ROOT/models/deep_hdr/ldr2hdr.pth.
+      5. ComfyUI folder_paths checkpoints / models_dir.
+      6. COMFYUI_HOME/models/deep_hdr/ldr2hdr.pth.
     """
+    candidates: list[tuple[str, str]] = []
+
     env_path = os.environ.get("DEEP_HDR_WEIGHTS_PATH", "").strip()
-    if env_path and os.path.isfile(env_path):
-        return env_path
+    if env_path:
+        candidates.append((
+            "DEEP_HDR_WEIGHTS_PATH",
+            os.path.abspath(os.path.expanduser(env_path)),
+        ))
+
+    candidates.append((
+        "DNEG shared models",
+        "/jobs/SITE/V_PROD/VP_RND/StableDiffusion/SD_models_repo/models/deep_hdr/ldr2hdr.pth",
+    ))
 
     models_root = os.environ.get("COMFY_MODELS_ROOT", "").strip()
     if models_root:
-        candidate = os.path.join(models_root, "models", "deep_hdr", "ldr2hdr.pth")
-        if os.path.isfile(candidate):
-            return candidate
+        models_root = os.path.abspath(os.path.expanduser(models_root))
+        candidates.extend([
+            (
+                "COMFY_MODELS_ROOT/deep_hdr",
+                os.path.join(models_root, "deep_hdr", "ldr2hdr.pth"),
+            ),
+            (
+                "COMFY_MODELS_ROOT/models/deep_hdr",
+                os.path.join(models_root, "models", "deep_hdr", "ldr2hdr.pth"),
+            ),
+        ])
 
     try:
         import folder_paths
+
         search_dirs: list[str] = []
+
         try:
             search_dirs += folder_paths.get_folder_paths("checkpoints")
         except Exception:
             pass
+
         try:
             search_dirs.append(folder_paths.models_dir)
         except Exception:
             pass
+
         for base in search_dirs:
-            candidate = os.path.join(base, "deep_hdr", "ldr2hdr.pth")
-            if os.path.isfile(candidate):
-                return candidate
+            if not base:
+                continue
+            base = os.path.abspath(os.path.expanduser(base))
+            candidates.append((
+                f"Comfy model path: {base}",
+                os.path.join(base, "deep_hdr", "ldr2hdr.pth"),
+            ))
     except ImportError:
         pass
 
     comfyui_home = os.environ.get("COMFYUI_HOME", "").strip()
     if comfyui_home:
-        candidate = os.path.join(comfyui_home, "models", "deep_hdr", "ldr2hdr.pth")
-        if os.path.isfile(candidate):
-            return candidate
+        comfyui_home = os.path.abspath(os.path.expanduser(comfyui_home))
+        candidates.append((
+            "COMFYUI_HOME/models/deep_hdr",
+            os.path.join(comfyui_home, "models", "deep_hdr", "ldr2hdr.pth"),
+        ))
 
-    # Try the current show's Nuke AI path (show-local deployment).
-    show = os.environ.get("SHOW", "").strip()
-    if show:
-        candidate = f"/jobs/{show}/ldev_pipe/nuke/ai/deep_hdr/deephdr/ldr2hdr.pth"
-        if os.path.isfile(candidate):
-            return candidate
-
-    # Last resort: known shared location where the model was first deployed.
-    _FALLBACK = "/jobs/ADGRE/ldev_pipe/nuke/ai/deep_hdr/deephdr/ldr2hdr.pth"
-    if os.path.isfile(_FALLBACK):
-        return _FALLBACK
+    missing = []
+    for source, path in candidates:
+        if os.path.isfile(path):
+            return path
+        missing.append(f"  - {source}: {path}")
 
     raise FileNotFoundError(
         "DeepHDR weights (ldr2hdr.pth) not found.\n"
-        "Set DEEP_HDR_WEIGHTS_PATH to the absolute path of ldr2hdr.pth, or\n"
-        "place it at $COMFY_MODELS_ROOT/models/deep_hdr/ldr2hdr.pth."
+        "Tried the following locations:\n"
+        + "\n".join(missing)
+        + "\n\nSet DEEP_HDR_WEIGHTS_PATH to the absolute path of ldr2hdr.pth, "
+        "or place it at:\n"
+        "  /jobs/SITE/V_PROD/VP_RND/StableDiffusion/SD_models_repo/models/deep_hdr/ldr2hdr.pth"
     )
 
 
