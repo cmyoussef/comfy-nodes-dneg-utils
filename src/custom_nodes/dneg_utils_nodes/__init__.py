@@ -2,6 +2,10 @@
 
 Small general utility nodes that do not yet justify dedicated repositories.
 Add new node modules under ``_nodes/`` and register them in ``_ALL_NODES``.
+
+UI-only nodes still declare a schema and go in ``_ALL_NODES`` so ComfyUI
+registers them from ``object_info`` in every renderer; their behaviour lives in
+``web/``. See ``_nodes/_group_toggle.py`` + ``web/dneg_group_toggle.js``.
 """
 import logging
 
@@ -10,6 +14,7 @@ from typing_extensions import override
 from comfy_api.latest import ComfyAPI, ComfyExtension, io
 
 from ._nodes._list_files import DN_ListFiles
+from ._nodes._group_toggle import DN_GroupToggle
 from .ddcoloring.node_single import DDColorNode
 from .ddcoloring.node_sequence import DDColorSequenceNode
 from .fpt_lens_distort.nodes import (
@@ -44,8 +49,13 @@ except Exception:  # pragma: no cover - depends on Comfy runtime environment
 
 api = ComfyAPI()
 
+# Served at /extensions/dneg_utils_nodes/. ComfyUI reads this attribute in
+# nodes.py::load_custom_node regardless of the V1/V3 node style.
+WEB_DIRECTORY = "./web"
+
 _ALL_NODES = [
     DN_ListFiles,
+    DN_GroupToggle,
     DDColorNode,
     DDColorSequenceNode,
     FPTLensDistortUndistort,
